@@ -1,0 +1,25 @@
+config:
+  target: "ws://localhost:3000/auc_101?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiJlMmVfc3RyZXNzX2JvdCIsImlhdCI6MTc4NDk3NDMxOX0.r258N62kd13tWe2-0rP6__V36Ah4Blcbr1NNFrb-FB8"
+  processor: "./artillery-processor.cjs"
+  phases:
+    - name: "Ramp up active bidders (30s)"
+      duration: 30
+      arrivalRate: 10
+      rampTo: 100
+    - name: "Sustained high concurrency (60s)"
+      duration: 60
+      arrivalRate: 100
+      maxVusers: 1000
+  ws:
+    rejectUnauthorized: false
+
+scenarios:
+  - name: "Full End-to-End Engine & Pipeline Load Test"
+    engine: ws
+    flow:
+      - connect: "{{ target }}"
+      - loop:
+          - function: "generateEscalatingBid"
+          - send: '{"userId":"{{ userId }}","amount":{{ bidAmount }} }'
+          - think: 0.15
+        count: 20
