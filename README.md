@@ -148,10 +148,3 @@ docker-compose up --build -d
 - **Kubernetes Migration**: Writing Helm charts to replace Docker Compose for true distributed cluster orchestration.
 - **Bid Replay**: Utilizing Kafka's event retention to build an "auction replay" feature for completed lots.
 
-## Screenshots
-
-| Live Bidding Interface | Dashboard Overview |
-|:---:|:---:|
-| *(Add GIF of realtime bidding here)* | *(Add screenshot of Dashboard here)* |
-| Grafana Telemetry | Mobile Responsive View |
-| *(Add screenshot of Grafana Dashboards here)* | *(Add screenshot of Mobile UI here)* |
