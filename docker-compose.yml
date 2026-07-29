@@ -10,6 +10,8 @@ services:
       POSTGRES_DB: bidding_engine
     ports:
       - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U sainath -d bidding_engine"]
       interval: 5s
@@ -21,6 +23,9 @@ services:
     container_name: bidding_redis
     ports:
       - "6379:6379"
+    volumes:
+      - redisdata:/data
+    command: redis-server --save 60 1 --loglevel warning
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -33,6 +38,9 @@ services:
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - zkdata:/var/lib/zookeeper/data
+      - zklog:/var/lib/zookeeper/log
 
   kafka:
     image: confluentinc/cp-kafka:7.5.0
@@ -48,9 +56,11 @@ services:
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    volumes:
+      - kafkadata:/var/lib/kafka/data
 
   gateway:
-    build: .
+    build: ./backend
     container_name: bidding_gateway
     ports:
       - "3000:3000"
@@ -63,6 +73,8 @@ services:
       DB_PASSWORD: postgrespassword
       DB_NAME: bidding_engine
       KAFKA_BROKERS: kafka:29092
+    volumes:
+      - ./backend/public/uploads:/usr/src/app/public/uploads
     depends_on:
       postgres:
         condition: service_healthy
@@ -70,7 +82,7 @@ services:
         condition: service_healthy
 
   consumer:
-    build: .
+    build: ./backend
     container_name: bidding_consumer
     command: ["node", "src/consumer.js"]
     environment:
@@ -94,6 +106,7 @@ services:
       - "9090:9090"
     volumes:
       - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - promdata:/prometheus
     depends_on:
       - gateway
 
@@ -104,6 +117,25 @@ services:
       - "3001:3000"
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafanadata:/var/lib/grafana
     depends_on:
       - prometheus
+
+  frontend:
+    build: ./frontend
+    container_name: bidding_frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - gateway
+
+volumes:
+  pgdata:
+  redisdata:
+  zkdata:
+  zklog:
+  kafkadata:
+  promdata:
+  grafanadata:
 

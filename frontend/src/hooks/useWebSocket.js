@@ -1,9 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { WS_BASE, DEV_TOKEN } from '../lib/constants';
+import { WS_BASE } from '../lib/constants';
 
 const RECONNECT_DELAYS = [1000, 2000, 4000, 8000, 16000];
 
-export function useWebSocket(auctionId) {
+export function useWebSocket(auctionId, onMessage) {
   const [isConnected, setIsConnected] = useState(false);
   const [lastMessage, setLastMessage] = useState(null);
   const wsRef = useRef(null);
@@ -15,7 +15,8 @@ export function useWebSocket(auctionId) {
     if (!auctionId) return;
 
     try {
-      const url = `${WS_BASE}/${auctionId}?token=${DEV_TOKEN}`;
+      const activeToken = localStorage.getItem('artmart_jwt_token') || '';
+      const url = `${WS_BASE}/${encodeURIComponent(auctionId)}?token=${encodeURIComponent(activeToken)}`;
       const ws = new WebSocket(url);
       wsRef.current = ws;
 
@@ -29,6 +30,7 @@ export function useWebSocket(auctionId) {
         if (!mountedRef.current) return;
         try {
           const data = JSON.parse(event.data);
+          if (onMessage) onMessage(data);
           setLastMessage(data);
         } catch {
           // ignore non-JSON messages

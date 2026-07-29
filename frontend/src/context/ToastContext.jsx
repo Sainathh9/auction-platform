@@ -14,7 +14,7 @@ export function ToastProvider({ children }) {
     timersRef.current[id] = setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== id));
       delete timersRef.current[id];
-    }, 3000);
+    }, 4000);
     return id;
   }, []);
 
@@ -29,22 +29,22 @@ export function ToastProvider({ children }) {
   return (
     <ToastContext.Provider value={{ addToast, removeToast }}>
       {children}
-      <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-2 pointer-events-none">
+      <div className="fixed bottom-5 right-5 z-[9999] flex flex-col gap-2 pointer-events-none">
         {toasts.map((toast) => (
           <div
             key={toast.id}
-            className={`pointer-events-auto flex items-center gap-3 bg-white border border-[#E2E4E9] px-4 py-3 text-sm min-w-[300px] animate-fade-in ${
+            className={`pointer-events-auto flex items-center gap-3 bg-gray-900 text-white px-4 py-3 text-xs font-mono min-w-[320px] rounded-lg shadow-2xl border border-gray-700 animate-fade-in ${
               toast.variant === 'success'
-                ? 'border-l-[3px] border-l-[#1F5E45]'
+                ? 'border-l-4 border-l-emerald-500'
                 : toast.variant === 'error'
-                ? 'border-l-[3px] border-l-[#B91C1C]'
-                : 'border-l-[3px] border-l-[#1A2B4C]'
+                ? 'border-l-4 border-l-red-500'
+                : 'border-l-4 border-l-blue-500'
             }`}
           >
-            <span className="flex-1 text-[#12151C]">{toast.message}</span>
+            <span className="flex-1 text-white font-medium">{toast.message}</span>
             <button
               onClick={() => removeToast(toast.id)}
-              className="text-[#6B7280] hover:text-[#12151C] text-xs cursor-pointer"
+              className="text-gray-400 hover:text-white text-xs cursor-pointer px-1"
             >
               ✕
             </button>

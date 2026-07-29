@@ -1,8 +1,6 @@
-import { useState } from 'react';
-import { seedAuction } from '../lib/api';
+import { useState, useEffect } from 'react';
 import { useToast } from '../context/ToastContext';
-import { MOCK_AUCTIONS } from '../lib/mockData';
-import { CATEGORIES } from '../lib/constants';
+import { seedAuction, getAllAuctions, recoverAuction, getCategories, uploadImages } from '../lib/api';
 import DataTable from '../components/DataTable';
 import Badge from '../components/Badge';
 import CountdownTimer from '../components/CountdownTimer';
@@ -17,83 +15,122 @@ function generateId() {
   return 'AUC-' + Math.random().toString(36).substring(2, 8);
 }
 
+// Returns a datetime-local string for <input type="datetime-local"> offset by `minutesOffset`
+function localDatetimeValue(minutesOffset = 0) {
+  const d = new Date(Date.now() + minutesOffset * 60 * 1000);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 export default function Admin() {
   const { addToast } = useToast();
   const [title, setTitle] = useState('');
-  const [category, setCategory] = useState(CATEGORIES[0]);
+  const [category, setCategory] = useState('');
+  const [description, setDescription] = useState('');
+  const [categories, setCategories] = useState([]);
   const [startPrice, setStartPrice] = useState('');
-  const [duration, setDuration] = useState('300');
+  const [startDatetime, setStartDatetime] = useState(() => localDatetimeValue(0));
+  const [endDatetime, setEndDatetime] = useState(() => localDatetimeValue(60));
+  const [selectedFiles, setSelectedFiles] = useState([]);
   const [submitting, setSubmitting] = useState(false);
-  const [ownedAuctions, setOwnedAuctions] = useState(
-    MOCK_AUCTIONS.filter((a) => a.status === 'ACTIVE')
-  );
+  const [ownedAuctions, setOwnedAuctions] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  // Fetch active auctions from backend API on mount
+  const fetchAuctions = () => {
+    setLoading(true);
+    Promise.all([getAllAuctions(), getCategories()])
+      .then(([auctionData, catData]) => {
+        if (Array.isArray(auctionData)) setOwnedAuctions(auctionData);
+        if (Array.isArray(catData)) {
+          const defaultCats = ['Art', 'Collectibles', 'Electronics', 'Jewelry', 'Real Estate', 'Vehicles'];
+          const merged = Array.from(new Set([...defaultCats, ...catData])).sort();
+          setCategories(merged);
+          if (!category) setCategory(merged[0]);
+        }
+      })
+      .catch((err) => {
+        console.error('Failed to load data from backend', err);
+      })
+      .finally(() => {
+        setLoading(false);
+      });
+  };
+
+  useEffect(() => {
+    fetchAuctions();
+  }, []);
 
   async function handleCreate(e) {
     e.preventDefault();
-    if (!title.trim() || !startPrice) {
+    if (!title.trim() || !startPrice || !startDatetime || !endDatetime) {
       addToast('Fill in all required fields', 'error');
+      return;
+    }
+
+    const startMs = new Date(startDatetime).getTime();
+    const endMs = new Date(endDatetime).getTime();
+
+    if (isNaN(startMs) || isNaN(endMs)) {
+      addToast('Invalid date values', 'error');
+      return;
+    }
+    if (endMs <= startMs) {
+      addToast('End time must be after start time', 'error');
+      return;
+    }
+    if (endMs <= Date.now()) {
+      addToast('End time must be in the future', 'error');
       return;
     }
 
     const auctionId = generateId();
     const price = parseFloat(startPrice);
-    const dur = parseInt(duration, 10);
 
     setSubmitting(true);
 
     try {
-      await seedAuction({ auctionId, title: title.trim(), startPrice: price, durationSeconds: dur });
-      addToast(`Auction "${title}" created & scheduled in BullMQ`, 'success');
+      let parsedImages = ['/images/placeholder.png'];
+      if (selectedFiles && selectedFiles.length > 0) {
+        const uploadRes = await uploadImages(selectedFiles);
+        if (uploadRes && uploadRes.urls && uploadRes.urls.length > 0) {
+          parsedImages = uploadRes.urls;
+        }
+      }
 
-      setOwnedAuctions((prev) => [
-        {
-          id: auctionId,
-          title: title.trim(),
-          category: category,
-          image: '/images/rolex.png',
-          startPrice: price,
-          currentHighestBid: price,
-          bidCount: 0,
-          status: 'ACTIVE',
-          startTime: Date.now(),
-          endTime: Date.now() + dur * 1000,
-        },
-        ...prev,
-      ]);
-
-      setTitle('');
-      setStartPrice('');
-      setDuration('300');
-    } catch {
-      addToast(`Auction "${title}" seeded locally (backend offline)`, 'info');
-      setOwnedAuctions((prev) => [
-        {
-          id: auctionId,
-          title: title.trim(),
-          category: category,
-          image: '/images/rolex.png',
-          startPrice: price,
-          currentHighestBid: price,
-          bidCount: 0,
-          status: 'ACTIVE',
-          startTime: Date.now(),
-          endTime: Date.now() + dur * 1000,
-        },
-        ...prev,
-      ]);
-      setTitle('');
-      setStartPrice('');
-      setDuration('300');
+      await seedAuction({
+        auctionId,
+        title: title.trim(),
+        category,
+        images: parsedImages,
+        description: description.trim() || `Created via Admin Terminal on ${new Date().toLocaleString()}`,
+        startPrice: price,
+        startTime: new Date(startMs).toISOString(),
+        endTime: new Date(endMs).toISOString(),
+      });
+      addToast(`Auction "${title}" created & scheduled in BullMQ worker`, 'success');
+      fetchAuctions();
+    } catch (err) {
+      addToast(err.message || `Failed to create auction`, 'error');
     } finally {
+      setTitle('');
+      setDescription('');
+      setStartPrice('');
+      setStartDatetime(localDatetimeValue(0));
+      setEndDatetime(localDatetimeValue(60));
+      setSelectedFiles([]);
       setSubmitting(false);
     }
   }
 
-  function handleClose(auctionId) {
-    setOwnedAuctions((prev) =>
-      prev.map((a) => (a.id === auctionId ? { ...a, status: 'FINISHED', endTime: Date.now() } : a))
-    );
-    addToast(`Auction ${auctionId} status set to FINISHED in Redis/Postgres`, 'success');
+  async function handleRecover(auctionId) {
+    try {
+      await recoverAuction(auctionId);
+      addToast(`Hot Path state engine for ${auctionId} rehydrated in Redis`, 'success');
+      fetchAuctions();
+    } catch (err) {
+      addToast(`Failed to recover auction: ${err.message}`, 'error');
+    }
   }
 
   const columns = [
@@ -104,7 +141,7 @@ export default function Admin() {
       render: (val, row) => (
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 bg-slate-100 flex-shrink-0 overflow-hidden border border-slate-200">
-            <PlaceholderImage src={row.image} name={val} size={40} className="w-full h-full object-cover" />
+            <PlaceholderImage src={row.images?.[0]} name={val} size={40} className="w-full h-full object-cover" />
           </div>
           <div>
             <div className="font-semibold text-[#12151C]">{val}</div>
@@ -129,14 +166,31 @@ export default function Admin() {
       align: 'right',
     },
     {
+      key: 'startTime',
+      label: 'Start Time',
+      sortable: true,
+      render: (val) => (
+        <span className="text-xs text-[#6B7280] font-mono">
+          {val ? new Date(val).toLocaleString('en-US', { dateStyle: 'short', timeStyle: 'short' }) : '—'}
+        </span>
+      ),
+    },
+    {
       key: 'endTime',
-      label: 'Expiration Timer',
+      label: 'End Time / Timer',
       sortable: false,
       render: (val, row) =>
         row.status === 'FINISHED' ? (
-          <span className="font-mono text-xs text-[#6B7280]">Ended</span>
+          <span className="font-mono text-xs text-[#6B7280]">
+            Ended {val ? new Date(val).toLocaleString('en-US', { dateStyle: 'short', timeStyle: 'short' }) : ''}
+          </span>
         ) : (
-          <CountdownTimer expiresAt={val} compact />
+          <div>
+            <CountdownTimer expiresAt={val} compact />
+            <div className="text-[10px] text-[#9CA3AF] font-mono mt-0.5">
+              {val ? new Date(val).toLocaleString('en-US', { dateStyle: 'short', timeStyle: 'short' }) : ''}
+            </div>
+          </div>
         ),
     },
     {
@@ -166,102 +220,201 @@ export default function Admin() {
   ];
 
   return (
-    <div className="p-6 max-w-[1400px] mx-auto space-y-6">
-      {/* Admin Title */}
+    <div className="p-6 max-w-[1400px] mx-auto space-y-8">
+      {/* Admin Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-bold text-[#12151C]">Auctioneer & Admin Terminal</h1>
-          <p className="text-xs text-[#6B7280] mt-0.5">
-            Seed auctions directly into PostgreSQL & Redis hot path with BullMQ scheduled expirations
+          <h1 className="text-2xl font-bold text-gray-900 tracking-tight">Auctioneer Terminal</h1>
+          <p className="text-sm text-gray-500 mt-1">
+            Seed auctions into PostgreSQL & Redis with BullMQ scheduled expiry
           </p>
         </div>
-        <span className="bg-slate-900 text-emerald-400 font-mono text-xs px-3 py-1 border border-slate-700">
-          ADMIN MODE ACTIVE
-        </span>
+
       </div>
 
-      {/* Create Auction Lot Form Card */}
-      <div className="border border-[#E2E4E9] bg-white p-5 shadow-xs">
-        <h2 className="text-sm font-semibold text-[#12151C] uppercase tracking-wider mb-4 border-b border-[#E2E4E9] pb-2">
-          Create & Seed New Auction Lot
-        </h2>
+      {/* Create Auction Card — Premium Dark Theme */}
+      <div className="rounded-2xl overflow-hidden shadow-xl border border-gray-200">
+        {/* Card Header */}
+        <div className="bg-gray-950 px-8 py-5 flex items-center justify-between">
+          <div>
+            <h2 className="text-white font-semibold text-base tracking-tight">Create New Auction Lot</h2>
+            <p className="text-gray-400 text-xs mt-0.5 font-mono">POST /api/auctions/seed</p>
+          </div>
+          <div className="flex items-center gap-2 text-xs font-mono text-gray-400">
+            <span className="w-2 h-2 rounded-full bg-red-500 inline-block" />
+            <span className="w-2 h-2 rounded-full bg-yellow-500 inline-block" />
+            <span className="w-2 h-2 rounded-full bg-green-500 inline-block" />
+          </div>
+        </div>
 
-        <form onSubmit={handleCreate} className="space-y-4">
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
-            <div>
-              <label className="text-xs font-mono text-[#6B7280] uppercase tracking-wide block mb-1">
-                Item Title *
-              </label>
-              <input
-                type="text"
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                placeholder="e.g. 1968 Rolex Submariner"
-                className="w-full border border-[#E2E4E9] bg-white px-3 py-2 text-xs text-[#12151C] focus:outline-none focus:border-[#1A2B4C] placeholder:text-[#9CA3AF]"
-                disabled={submitting}
-              />
+        {/* Card Body */}
+        <div className="bg-gray-50 px-8 py-7">
+          <form onSubmit={handleCreate} className="space-y-6">
+            {/* Row 1: Title, Category, Starting Price */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-5">
+              <div className="sm:col-span-1">
+                <label className="block text-xs font-semibold text-gray-500 uppercase tracking-widest mb-2">
+                  Item Title <span className="text-gray-900">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                  placeholder="e.g. 1968 Rolex Submariner"
+                  className="w-full bg-white border border-gray-200 rounded-xl px-4 py-3 text-sm text-gray-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent placeholder:text-gray-400 transition-all"
+                  disabled={submitting}
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-gray-500 uppercase tracking-widest mb-2">
+                  Category <span className="text-gray-900">*</span>
+                </label>
+                <select
+                  value={category}
+                  onChange={(e) => setCategory(e.target.value)}
+                  className="w-full bg-white border border-gray-200 rounded-xl px-4 py-3 text-sm text-gray-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent transition-all"
+                  disabled={submitting}
+                >
+                  {categories.map((c) => (
+                    <option key={c} value={c}>{c}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="md:col-span-2">
+                <label className="block text-xs font-semibold text-gray-500 uppercase tracking-widest mb-2">
+                  Description
+                </label>
+                <textarea
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  placeholder="Enter detailed description about the item..."
+                  rows={3}
+                  className="w-full bg-white border border-gray-200 rounded-xl px-4 py-3 text-sm text-gray-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent placeholder:text-gray-400 transition-all resize-none"
+                  disabled={submitting}
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-gray-500 uppercase tracking-widest mb-2">
+                  Starting Price ($) <span className="text-gray-900">*</span>
+                </label>
+                <div className="relative">
+                  <span className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 font-semibold text-sm">$</span>
+                  <input
+                    type="number"
+                    step="1"
+                    min="1"
+                    value={startPrice}
+                    onChange={(e) => setStartPrice(e.target.value)}
+                    placeholder="1,000"
+                    className="w-full bg-white border border-gray-200 rounded-xl pl-8 pr-4 py-3 text-sm font-mono text-gray-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent placeholder:text-gray-400 transition-all"
+                    disabled={submitting}
+                  />
+                </div>
+              </div>
             </div>
 
+            {/* Row 2: Start + End Datetime */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+              <div>
+                <label className="block text-xs font-semibold text-gray-500 uppercase tracking-widest mb-2">
+                  Start Date & Time <span className="text-gray-900">*</span>
+                </label>
+                <input
+                  type="datetime-local"
+                  value={startDatetime}
+                  onChange={(e) => setStartDatetime(e.target.value)}
+                  className="w-full bg-white border border-gray-200 rounded-xl px-4 py-3 text-sm font-mono text-gray-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent transition-all"
+                  disabled={submitting}
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-gray-500 uppercase tracking-widest mb-2">
+                  End Date & Time <span className="text-gray-900">*</span>
+                </label>
+                <input
+                  type="datetime-local"
+                  value={endDatetime}
+                  onChange={(e) => setEndDatetime(e.target.value)}
+                  min={startDatetime}
+                  className="w-full bg-white border border-gray-200 rounded-xl px-4 py-3 text-sm font-mono text-gray-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent transition-all"
+                  disabled={submitting}
+                />
+                {startDatetime && endDatetime && new Date(endDatetime) > new Date(startDatetime) && (
+                  <p className="text-xs text-emerald-600 font-mono mt-2 flex items-center gap-1.5">
+                    <span>⏱</span>
+                    Duration: {Math.round((new Date(endDatetime) - new Date(startDatetime)) / 60000)} minutes
+                  </p>
+                )}
+              </div>
+            </div>
+
+            {/* Row 3: Images */}
             <div>
-              <label className="text-xs font-mono text-[#6B7280] uppercase tracking-wide block mb-1">
-                Category *
+              <label className="block text-xs font-semibold text-gray-500 uppercase tracking-widest mb-2">
+                Images (Upload multiple)
               </label>
-              <select
-                value={category}
-                onChange={(e) => setCategory(e.target.value)}
-                className="w-full border border-[#E2E4E9] bg-white px-3 py-2 text-xs text-[#12151C] focus:outline-none focus:border-[#1A2B4C]"
+              <div className="relative group">
+                <input
+                  type="file"
+                  id="image-upload"
+                  multiple
+                  accept="image/jpeg, image/png, image/webp"
+                  onChange={(e) => setSelectedFiles(Array.from(e.target.files))}
+                  className="hidden"
+                  disabled={submitting}
+                />
+                <label
+                  htmlFor="image-upload"
+                  className="w-full flex items-center justify-center gap-3 bg-white border border-dashed border-gray-300 rounded-xl px-4 py-8 text-sm text-gray-900 shadow-sm cursor-pointer hover:bg-gray-50 hover:border-gray-400 transition-all focus-within:ring-2 focus-within:ring-gray-900 focus-within:border-transparent group-hover:shadow-md"
+                >
+                  <svg className="w-6 h-6 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                  </svg>
+                  <span className="font-medium text-gray-700">
+                    {selectedFiles.length > 0 ? `${selectedFiles.length} file(s) selected` : 'Click to select images'}
+                  </span>
+                </label>
+                {selectedFiles.length > 0 && (
+                  <div className="mt-3 flex gap-2 overflow-x-auto pb-2">
+                    {selectedFiles.map((f, i) => (
+                      <div key={i} className="relative w-12 h-12 rounded-lg border border-gray-200 overflow-hidden shrink-0">
+                        <img src={URL.createObjectURL(f)} alt="preview" className="w-full h-full object-cover" />
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Submit Row */}
+            <div className="flex items-center justify-between pt-4 border-t border-gray-200">
+              <p className="text-xs text-gray-400 font-mono hidden sm:block">
+                BullMQ worker fires at exact end time → Kafka settlement event published
+              </p>
+              <button
+                type="submit"
                 disabled={submitting}
+                className="bg-gray-950 hover:bg-gray-800 text-white px-8 py-3 rounded-xl text-sm font-semibold tracking-wide transition-all duration-200 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed shadow-lg hover:shadow-xl flex items-center gap-2"
               >
-                {CATEGORIES.map((c) => (
-                  <option key={c} value={c}>{c}</option>
-                ))}
-              </select>
+                {submitting ? (
+                  <>
+                    <span className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin inline-block" />
+                    Seeding…
+                  </>
+                ) : (
+                  <>
+                    <span>＋</span>
+                    Seed Auction Lot
+                  </>
+                )}
+              </button>
             </div>
-
-            <div>
-              <label className="text-xs font-mono text-[#6B7280] uppercase tracking-wide block mb-1">
-                Starting Reserve ($) *
-              </label>
-              <input
-                type="number"
-                step="1"
-                min="1"
-                value={startPrice}
-                onChange={(e) => setStartPrice(e.target.value)}
-                placeholder="1000"
-                className="w-full border border-[#E2E4E9] bg-white px-3 py-2 text-xs font-mono text-[#12151C] focus:outline-none focus:border-[#1A2B4C] placeholder:text-[#9CA3AF]"
-                disabled={submitting}
-              />
-            </div>
-
-            <div>
-              <label className="text-xs font-mono text-[#6B7280] uppercase tracking-wide block mb-1">
-                Duration (Seconds)
-              </label>
-              <input
-                type="number"
-                min="10"
-                value={duration}
-                onChange={(e) => setDuration(e.target.value)}
-                className="w-full border border-[#E2E4E9] bg-white px-3 py-2 text-xs font-mono text-[#12151C] focus:outline-none focus:border-[#1A2B4C]"
-                disabled={submitting}
-              />
-            </div>
-          </div>
-
-          <div className="flex items-center justify-between pt-2 border-t border-[#E2E4E9]">
-            <span className="text-[11px] font-mono text-[#6B7280]">
-              POST /api/auctions/seed → Initializes Redis hash + BullMQ delay worker
-            </span>
-            <button
-              type="submit"
-              disabled={submitting}
-              className="bg-[#1A2B4C] hover:bg-[#0f1d33] text-white px-6 py-2 text-xs font-mono font-bold uppercase tracking-wider transition-colors cursor-pointer disabled:opacity-50"
-            >
-              {submitting ? 'SEEDING DATABASE...' : 'SEED AUCTION LOT'}
-            </button>
-          </div>
-        </form>
+          </form>
+        </div>
       </div>
 
       {/* Owned Auctions Table */}

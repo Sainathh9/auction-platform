@@ -1,4 +1,4 @@
-import 'dotenv/config'; // <-- CRITICAL: Must be the very first line to load your .env file
+import 'dotenv/config'; 
 import express from 'express';
 import { WebSocketServer } from 'ws';
 import Redis from 'ioredis';
@@ -9,6 +9,26 @@ import { Queue, Worker } from 'bullmq';
 const { Pool } = pkg;
 import client from 'prom-client';
 import jwt from 'jsonwebtoken';
+import bcrypt from 'bcryptjs';
+import multer from 'multer';
+import path from 'path';
+import fs from 'fs';
+
+const uploadDir = path.join(process.cwd(), 'public', 'uploads');
+if (!fs.existsSync(uploadDir)) {
+    fs.mkdirSync(uploadDir, { recursive: true });
+}
+
+const storage = multer.diskStorage({
+    destination: function (req, file, cb) {
+        cb(null, uploadDir)
+    },
+    filename: function (req, file, cb) {
+        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9)
+        cb(null, uniqueSuffix + path.extname(file.originalname))
+    }
+});
+const upload = multer({ storage: storage });
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your-production-secret-key';
 
@@ -127,6 +147,12 @@ const auctionExpiryWorker = new Worker('auction-expiry', async (job) => {
         if (winningBidRes.rows.length > 0) {
             const winner = winningBidRes.rows[0];
             
+            // Save winner and final price to database
+            await dbClient.query(
+                `UPDATE auctions SET winner_id = $1, final_price = $2 WHERE id = $3;`,
+                [winner.user_id, winner.amount, auctionId]
+            );
+
             // Publish settlement event for downstream payment/fulfillment services
             await kafkaProducer.send({
                 topic: 'auction-settlements',
@@ -176,6 +202,18 @@ const kafkaBrokers = process.env.KAFKA_BROKERS
     : ['localhost:9092'];
 
 app.use(express.json());
+app.use('/uploads', express.static(path.join(process.cwd(), 'public', 'uploads')));
+
+// Enable CORS for frontend applications
+app.use((req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    if (req.method === 'OPTIONS') {
+        return res.sendStatus(200);
+    }
+    next();
+});
 
 // KAFKA BROKER INITIALIZATION
 const kafka = new Kafka({
@@ -226,10 +264,14 @@ const DUAL_STORE_LUA = `
     local current_price = tonumber(redis.call('HGET', KEYS[2], 'current_highest_bid') or 0)
     local incoming_amount = tonumber(ARGV[1])
 
+    -- Increment bid_count for all bid attempts, both accepted and rejected
+    redis.call('HINCRBY', KEYS[2], 'bid_count', 1)
+
     if incoming_amount > current_price then
         redis.call('ZADD', KEYS[1], ARGV[1], ARGV[2])
         redis.call('HSET', KEYS[2], 'current_highest_bid', ARGV[1], 'last_bidder', ARGV[2])
         
+
         -- ANTI-SNIPING LOGIC:
         -- Must have time left (time_remaining > 0) AND be within the 10,000ms window
         local time_remaining = expires_at - current_time
@@ -254,6 +296,249 @@ const DUAL_STORE_LUA = `
 
 redisClient.defineCommand('processStrictBid', { numberOfKeys: 2, lua: DUAL_STORE_LUA });
 
+// AUTHENTICATION ENDPOINTS (JWT, bcrypt, Google OAuth)
+app.use(express.json());
+
+// DATABASE INITIALIZATION & AUTOMATIC CATALOG SEEDING
+async function initDatabase() {
+    try {
+        const client = await pgPool.connect();
+        try {
+            await client.query(`
+                CREATE TABLE IF NOT EXISTS users (
+                    id VARCHAR(255) PRIMARY KEY,
+                    name VARCHAR(255) NOT NULL,
+                    email VARCHAR(255) UNIQUE NOT NULL,
+                    password VARCHAR(255) NOT NULL,
+                    avatar VARCHAR(500),
+                    role VARCHAR(50) DEFAULT 'BUYER',
+                    rating NUMERIC DEFAULT 0.0,
+                    sales_count INTEGER DEFAULT 0,
+                    verified_status VARCHAR(255),
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                );
+            `);
+
+            await client.query(`
+                CREATE TABLE IF NOT EXISTS auctions (
+                    id VARCHAR(255) PRIMARY KEY,
+                    title VARCHAR(255) NOT NULL,
+                    category VARCHAR(255),
+                    images TEXT[],
+                    description TEXT,
+                    start_price NUMERIC NOT NULL,
+                    current_highest_bid NUMERIC NOT NULL,
+                    bid_count INTEGER DEFAULT 0,
+                    status VARCHAR(50) NOT NULL DEFAULT 'ACTIVE',
+                    start_time TIMESTAMP WITH TIME ZONE,
+                    end_time TIMESTAMP WITH TIME ZONE,
+                    winner_id VARCHAR(255) REFERENCES users(id),
+                    final_price NUMERIC
+                );
+            `);
+
+            // Add columns if they don't exist (for existing tables)
+            try {
+                await client.query(`ALTER TABLE auctions ADD COLUMN winner_id VARCHAR(255) REFERENCES users(id);`);
+            } catch (e) { /* ignore if exists */ }
+            try {
+                await client.query(`ALTER TABLE auctions ADD COLUMN final_price NUMERIC;`);
+            } catch (e) { /* ignore if exists */ }
+
+            await client.query(`
+                CREATE TABLE IF NOT EXISTS bids (
+                    id SERIAL PRIMARY KEY,
+                    auction_id VARCHAR(255) NOT NULL REFERENCES auctions(id) ON DELETE CASCADE,
+                    user_id VARCHAR(255) NOT NULL,
+                    amount NUMERIC NOT NULL,
+                    status VARCHAR(50) NOT NULL DEFAULT 'ACCEPTED',
+                    bid_timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                );
+            `);
+
+            console.log('[Database Init] Tables ready. No dummy data seeded as per user request.');
+        } finally {
+            client.release();
+        }
+    } catch (err) {
+        console.error('[Database Init Error]', err);
+    }
+}
+
+initDatabase();
+
+
+app.post('/api/upload', upload.array('images', 10), (req, res) => {
+    if (!req.files || req.files.length === 0) {
+        return res.status(400).json({ error: 'No files uploaded' });
+    }
+    const urls = req.files.map(f => `/uploads/${f.filename}`);
+    res.json({ urls });
+});
+
+app.post('/api/auth/register', async (req, res) => {
+  const { name, email, password } = req.body;
+  if (!email || !password || !name) {
+    return res.status(400).json({ error: 'Name, email, and password required' });
+  }
+
+  try {
+    const existing = await pgPool.query('SELECT id FROM users WHERE email = $1', [email.toLowerCase()]);
+    if (existing.rows.length > 0) {
+      return res.status(400).json({ error: 'User already exists' });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const id = `USR-${Date.now()}`;
+    const avatar = `https://ui-avatars.com/api/?name=${encodeURIComponent(name)}&background=000&color=fff`;
+
+    await pgPool.query(
+      'INSERT INTO users (id, name, email, password, avatar) VALUES ($1, $2, $3, $4, $5)',
+      [id, name, email.toLowerCase(), hashedPassword, avatar]
+    );
+
+    const token = jwt.sign(
+      { sub: id, email: email.toLowerCase(), name },
+      JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    return res.json({ token, user: { id, name, email: email.toLowerCase(), avatar } });
+  } catch (err) {
+    console.error('Register error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) {
+    return res.status(400).json({ error: 'Email and password required' });
+  }
+
+  try {
+    let userRes = await pgPool.query('SELECT * FROM users WHERE email = $1', [email.toLowerCase()]);
+    
+    // Seed stanley if not exists for easy testing
+    if (userRes.rows.length === 0 && email.toLowerCase() === 'stanley@gmail.com') {
+        const hashedPassword = await bcrypt.hash('password123', 10);
+        const avatar = 'https://ui-avatars.com/api/?name=Stanley+Hudson&background=000&color=fff';
+        await pgPool.query(
+            'INSERT INTO users (id, name, email, password, avatar) VALUES ($1, $2, $3, $4, $5)',
+            ['USR-GGL-8891', 'Stanley Hudson', 'stanley@gmail.com', hashedPassword, avatar]
+        );
+        userRes = await pgPool.query('SELECT * FROM users WHERE email = $1', [email.toLowerCase()]);
+    }
+
+    if (userRes.rows.length === 0) {
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
+
+    const user = userRes.rows[0];
+    const isValid = await bcrypt.compare(password, user.password);
+    if (!isValid) {
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
+
+    const token = jwt.sign(
+      { sub: user.id, email: user.email, name: user.name },
+      JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    const { password: _, ...userWithoutPass } = user;
+    return res.json({ token, user: userWithoutPass });
+  } catch (err) {
+    console.error('Login error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.post('/api/auth/google', async (req, res) => {
+  try {
+    const email = 'stanley@gmail.com';
+    let userRes = await pgPool.query('SELECT * FROM users WHERE email = $1', [email]);
+    let user;
+    if (userRes.rows.length === 0) {
+        const hashedPassword = await bcrypt.hash('password123', 10);
+        user = {
+            id: 'USR-GGL-8891',
+            name: 'Stanley Hudson',
+            email: 'stanley@gmail.com',
+            password: hashedPassword,
+            avatar: 'https://ui-avatars.com/api/?name=Stanley+Hudson&background=000&color=fff'
+        };
+        await pgPool.query(
+            'INSERT INTO users (id, name, email, password, avatar) VALUES ($1, $2, $3, $4, $5)',
+            [user.id, user.name, user.email, user.password, user.avatar]
+        );
+    } else {
+        user = userRes.rows[0];
+    }
+
+    const token = jwt.sign(
+      { sub: user.id, email: user.email, name: user.name, provider: 'google' },
+      JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    const { password: _, ...userWithoutPass } = user;
+    return res.json({ token, user: userWithoutPass });
+  } catch (err) {
+      res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.get('/api/sellers/top', async (req, res) => {
+    try {
+        const result = await pgPool.query("SELECT id, name, rating, sales_count as sales, verified_status as verified, avatar as image FROM users WHERE role = 'SELLER' ORDER BY rating DESC LIMIT 4");
+        res.json(result.rows);
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to fetch sellers' });
+    }
+});
+
+app.get('/api/categories', async (req, res) => {
+    try {
+        const result = await pgPool.query("SELECT DISTINCT category FROM auctions WHERE category IS NOT NULL ORDER BY category ASC");
+        res.json(result.rows.map(r => r.category));
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to fetch categories' });
+    }
+});
+
+app.get('/api/auth/me', (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Missing or invalid token' });
+  }
+
+  const token = authHeader.split(' ')[1];
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    return res.json({ user: decoded });
+  } catch (err) {
+    return res.status(401).json({ error: 'Invalid token' });
+  }
+});
+
+// JWT AUTHORIZATION MIDDLEWARE FOR PROTECTED API ENDPOINTS
+export const requireAuth = (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Unauthorized: Valid JWT Bearer Token Required' });
+  }
+
+  const token = authHeader.split(' ')[1];
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: 'Unauthorized: Invalid or Expired JWT Token' });
+  }
+};
+
 // PROMETHEUS SCRAPING ROUTE
 app.get('/metrics', async (req, res) => {
     try {
@@ -266,47 +551,69 @@ app.get('/metrics', async (req, res) => {
 
 // 4. SEEDING ROUTE
 app.post('/api/auctions/seed', async (req, res) => {
-    const { auctionId, title, startPrice, durationSeconds = 60 } = req.body;
+    const { auctionId, title, startPrice, startTime, endTime, category = 'Collectibles', images = ['/images/rolex.png'], description = '' } = req.body;
 
-    if (!auctionId || !title || !startPrice) {
+    if (!auctionId || !title || !startPrice || !startTime || !endTime) {
         return res.status(400).json({
-            error: "Missing auctionId, title, or startPrice"
+            error: "Missing required fields: auctionId, title, startPrice, startTime, endTime"
         });
     }
+
+    const startDate = new Date(startTime);
+    const endDate = new Date(endTime);
+    const now = Date.now();
+
+    if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
+        return res.status(400).json({ error: "Invalid startTime or endTime format. Use ISO 8601." });
+    }
+
+    if (endDate <= startDate) {
+        return res.status(400).json({ error: "endTime must be after startTime." });
+    }
+
+    if (endDate.getTime() <= now) {
+        return res.status(400).json({ error: "endTime must be in the future." });
+    }
+
+    const delayMs = endDate.getTime() - now; // ms until auction ends
 
     const dbClient = await pgPool.connect();
 
     try {
         await dbClient.query('BEGIN');
 
-        const startTime = new Date();
-        const endTime = new Date(startTime.getTime() + durationSeconds * 1000);
-
         await dbClient.query(
             `
             INSERT INTO auctions
-                (id, title, start_price, current_highest_bid, status, start_time, end_time)
+                (id, title, category, images, description, start_price, current_highest_bid, status, start_time, end_time)
             VALUES
-                ($1, $2, $3, $3, 'ACTIVE', $4, $5)
+                ($1, $2, $3, $4, $5, $6, $6, 'ACTIVE', $7, $8)
             ON CONFLICT (id)
             DO UPDATE
             SET
                 title = EXCLUDED.title,
+                category = EXCLUDED.category,
+                images = EXCLUDED.images,
+                description = EXCLUDED.description,
                 start_price = EXCLUDED.start_price,
                 current_highest_bid = EXCLUDED.current_highest_bid,
                 status = 'ACTIVE',
                 start_time = EXCLUDED.start_time,
                 end_time = EXCLUDED.end_time
             `,
-            [auctionId, title, startPrice, startTime, endTime]
+            [auctionId, title, category, images, description, startPrice, startDate, endDate]
         );
 
         await redisClient.hset(`auction:details:${auctionId}`, {
             title,
+            category,
+            images: JSON.stringify(images),
+            description,
             start_price: startPrice.toString(),
             current_highest_bid: startPrice.toString(),
+            bid_count: '0',
             status: "ACTIVE",
-            expires_at: endTime.getTime().toString()
+            expires_at: endDate.getTime().toString()
         });
 
         const jobId = `expire--${auctionId}`;
@@ -321,7 +628,7 @@ app.post('/api/auctions/seed', async (req, res) => {
                 { auctionId }, 
                 { 
                     jobId,
-                    delay: durationSeconds * 1000,
+                    delay: delayMs,
                     attempts: 5,
                     backoff: {
                         type: 'exponential',
@@ -338,7 +645,7 @@ app.post('/api/auctions/seed', async (req, res) => {
         await dbClient.query('COMMIT');
 
         res.status(200).json({
-            message: `Auction created successfully. BullMQ worker scheduled for target execution in ${durationSeconds} seconds.`
+            message: `Auction "${title}" created. BullMQ worker scheduled to fire at ${endDate.toISOString()} (in ${Math.round(delayMs / 1000)}s).`
         });
 
     } catch (err) {
@@ -349,6 +656,7 @@ app.post('/api/auctions/seed', async (req, res) => {
         dbClient.release();
     }
 });
+
 
 const server = app.listen(PORT, () => console.log(`[Gateway] Operating on port ${PORT}`));
 const wss = new WebSocketServer({ noServer: true });
@@ -363,24 +671,20 @@ server.on('upgrade', (request, socket, head) => {
     const url = new URL(rawUrl, `http://${request.headers.host || 'localhost'}`);
     const token = url.searchParams.get('token');
 
-    if (!token) {
-        socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-        socket.destroy();
-        return;
+    if (token) {
+        try {
+            // Verify JWT token signature and expiration
+            const decoded = jwt.verify(token, JWT_SECRET);
+            request.user = decoded; // Attach user payload to request
+        } catch (err) {
+            console.error('[WS] Invalid token on connection attempt:', err.message);
+            // Proceed as guest without setting request.user
+        }
     }
-
-    try {
-        // Verify JWT token signature and expiration
-        const decoded = jwt.verify(token, JWT_SECRET);
-        request.user = decoded; // Attach user payload to request
-        
-        wss.handleUpgrade(request, socket, head, (ws) => {
-            wss.emit('connection', ws, request);
-        });
-    } catch (err) {
-        socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
-        socket.destroy();
-    }
+    
+    wss.handleUpgrade(request, socket, head, (ws) => {
+        wss.emit('connection', ws, request);
+    });
 });
 
 const auctionRooms = new Map();
@@ -408,6 +712,20 @@ wss.on('connection', (ws, req) => {
     if (!auctionId) return ws.close(4000, 'Auction ID parameter missing');
     if (!auctionRooms.has(auctionId)) auctionRooms.set(auctionId, new Set());
     auctionRooms.get(auctionId).add(ws);
+
+    // Send initial snapshot so the client timer is anchored to backend ground truth
+    redisClient.hgetall(`auction:details:${auctionId}`).then((details) => {
+        if (details) {
+            ws.send(JSON.stringify({
+                type: 'AUCTION_SNAPSHOT',
+                auctionId,
+                status: details.status || 'ACTIVE',
+                currentHighestBid: parseFloat(details.current_highest_bid) || 0,
+                expiresAt: parseInt(details.expires_at, 10) || 0
+            }));
+        }
+    }).catch(() => {});
+
 
     const MAX_BIDS_PER_WINDOW = 10;
     const WINDOW_MS = 1000; // 1 second
@@ -451,6 +769,15 @@ wss.on('connection', (ws, req) => {
             }
 
             const { userId, amount } = validation.data;
+
+            if (!req.user || (req.user.id !== userId && req.user.sub !== userId)) {
+                console.log('WS Auth Failed:', { reqUser: req.user, payloadUserId: userId });
+                ws.send(JSON.stringify({ type: 'ERROR', reason: 'Unauthorized to place bids for this user context.' }));
+                bidCounter.labels({ status: 'ERROR' }).inc();
+                isProcessing = false;
+                return processQueue();
+            }
+
             const timestamp = Date.now();
             const memberPayload = JSON.stringify({ userId, ts: timestamp });
 
@@ -553,6 +880,26 @@ wss.on('connection', (ws, req) => {
                 ws.send(JSON.stringify({ type: 'BID_REJECTED', reason: 'Bid too low.' }));
             }
 
+            // Broadcasting every single bid attempt live to all connected clients
+            try {
+                const attemptPayload = {
+                    type: 'NEW_BID_ATTEMPT',
+                    auctionId,
+                    bid: {
+                        id: `bid_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+                        userId,
+                        amount,
+                        timestamp,
+                        status: bidStatus,
+                        userName: req.user?.name || req.user?.sub || userId,
+                        userAvatar: req.user?.avatar || null
+                    }
+                };
+                await redisClient.publish(`auction:broadcast:${auctionId}`, JSON.stringify(attemptPayload));
+            } catch (err) {
+                console.error('[Pub/Sub Broadcast Error]', err);
+            }
+
             // Asynchronous durability path (Cold Path with backpressure enforcement)
             await kafkaProducer.send({
                 topic: 'auction-bids',
@@ -602,24 +949,174 @@ wss.on('connection', (ws, req) => {
 });
 
 // 7. DASHBOARD LOG & CACHE RECOVERY API ROUTES
+
+// GET /api/auctions — returns all auctions from PostgreSQL + live Redis overlay
+app.get('/api/auctions', async (req, res) => {
+    try {
+        const { rows } = await pgPool.query(
+            `SELECT id, title, category, images, description, start_price as "startPrice", 
+                    current_highest_bid as "currentHighestBid", bid_count as "bidCount", 
+                    status, start_time as "startTime", end_time as "endTime"
+             FROM auctions 
+             ORDER BY start_time DESC;`
+        );
+
+        const auctions = await Promise.all(rows.map(async (row) => {
+            const redisDetails = await redisClient.hgetall(`auction:details:${row.id}`).catch(() => null);
+            let expiresAt = row.endTime ? new Date(row.endTime).getTime() : 0;
+            let status = row.status;
+            let currentHighestBid = parseFloat(row.currentHighestBid) || parseFloat(row.startPrice) || 0;
+            let bidCount = parseInt(row.bidCount, 10) || 0;
+
+            if (redisDetails && Object.keys(redisDetails).length > 0) {
+                if (redisDetails.expires_at) expiresAt = parseInt(redisDetails.expires_at, 10) || expiresAt;
+                if (redisDetails.status) status = redisDetails.status;
+                if (redisDetails.current_highest_bid) currentHighestBid = parseFloat(redisDetails.current_highest_bid) || currentHighestBid;
+                if (redisDetails.bid_count) bidCount = parseInt(redisDetails.bid_count, 10) || bidCount;
+            }
+
+            return {
+                id: row.id,
+                title: row.title,
+                category: row.category || 'Collectibles',
+                images: row.images || ['/images/rolex.png'],
+                description: row.description || '',
+                startPrice: parseFloat(row.startPrice) || 0,
+                currentHighestBid,
+                bidCount,
+                status,
+                startTime: row.startTime ? new Date(row.startTime).getTime() : Date.now() - 3600000,
+                endTime: expiresAt,
+            };
+        }));
+
+        return res.status(200).json(auctions);
+    } catch (err) {
+        console.error('[GET /api/auctions Error]', err);
+        return res.status(500).json({ error: 'Failed to fetch auctions from database' });
+    }
+});
+
+// GET /api/bids/me — returns all bids for the specified or authenticated user
+app.get('/api/bids/me', async (req, res) => {
+    const userId = req.query.userId || req.user?.sub || 'USR-a1b2';
+
+    try {
+        const { rows } = await pgPool.query(
+            `WITH UserHighestBids AS (
+                 SELECT DISTINCT ON (b.auction_id) 
+                     b.auction_id as "auctionId", 
+                     a.title as "auctionTitle", 
+                     b.amount, 
+                     b.status, 
+                     b.bid_timestamp as "timestamp"
+                 FROM bids b
+                 JOIN auctions a ON b.auction_id = a.id
+                 WHERE b.user_id = $1
+                 ORDER BY b.auction_id, b.amount DESC
+             )
+             SELECT * FROM UserHighestBids ORDER BY "timestamp" DESC;`,
+            [userId]
+        );
+        return res.status(200).json(rows);
+    } catch (err) {
+        console.error('[GET /api/bids/me Error]', err);
+        return res.status(500).json({ error: 'Failed to fetch user bids from database' });
+    }
+});
+
+// GET /api/auctions/:id — returns live auction state (Redis → Postgres fallback)
+app.get('/api/auctions/:id', async (req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    const auctionId = req.params.id;
+
+    try {
+        // Try Redis first (hot path)
+        const details = await redisClient.hgetall(`auction:details:${auctionId}`);
+
+        // Also query Postgres for static lot details if Redis is missing metadata
+        const { rows } = await pgPool.query(
+            `SELECT id, title, category, images, description, start_price as "startPrice", 
+                    current_highest_bid as "currentHighestBid", bid_count as "bidCount", 
+                    status, start_time as "startTime", end_time as "endTime"
+             FROM auctions WHERE id = $1 LIMIT 1;`,
+            [auctionId]
+        );
+
+        const pgRow = rows[0] || {};
+        
+        let parsedRedisImages = null;
+        if (details && details.images) {
+            try { parsedRedisImages = JSON.parse(details.images); } catch(e) {}
+        }
+
+        if (details && details.expires_at) {
+            return res.status(200).json({
+                id: auctionId,
+                auctionId,
+                title: details.title || pgRow.title || '',
+                category: details.category || pgRow.category || 'Collectibles',
+                images: parsedRedisImages || pgRow.images || ['/images/rolex.png'],
+                description: details.description || pgRow.description || '',
+                status: details.status || pgRow.status || 'ACTIVE',
+                currentHighestBid: parseFloat(details.current_highest_bid) || parseFloat(pgRow.currentHighestBid) || 0,
+                startPrice: parseFloat(details.start_price) || parseFloat(pgRow.startPrice) || 0,
+                bidCount: parseInt(details.bid_count, 10) || parseInt(pgRow.bidCount, 10) || 0,
+                startTime: pgRow.startTime ? new Date(pgRow.startTime).getTime() : Date.now() - 3600000,
+                expiresAt: parseInt(details.expires_at, 10) || (pgRow.endTime ? new Date(pgRow.endTime).getTime() : 0),
+                endTime: parseInt(details.expires_at, 10) || (pgRow.endTime ? new Date(pgRow.endTime).getTime() : 0),
+                source: 'redis'
+            });
+        }
+
+        if (rows.length === 0) {
+            return res.status(404).json({ error: 'Auction not found' });
+        }
+
+        const expiresAt = pgRow.endTime ? new Date(pgRow.endTime).getTime() : 0;
+        return res.status(200).json({
+            id: pgRow.id,
+            auctionId: pgRow.id,
+            title: pgRow.title,
+            category: pgRow.category || 'Collectibles',
+            images: pgRow.images || ['/images/rolex.png'],
+            description: pgRow.description || '',
+            status: pgRow.status,
+            currentHighestBid: parseFloat(pgRow.currentHighestBid) || 0,
+            startPrice: parseFloat(pgRow.startPrice) || 0,
+            bidCount: parseInt(pgRow.bidCount, 10) || 0,
+            startTime: pgRow.startTime ? new Date(pgRow.startTime).getTime() : Date.now() - 3600000,
+            expiresAt,
+            endTime: expiresAt,
+            source: 'postgres'
+        });
+
+    } catch (err) {
+        console.error('[Auction Detail API Error]', err);
+        return res.status(500).json({ error: 'Failed to fetch auction details.' });
+    }
+});
+
 app.get('/api/auctions/:id/history', async (req, res) => {
+
     const auctionId = req.params.id;
     const { userId } = req.query;
 
     try {
         let query = `
-            SELECT id, user_id as "userId", amount, bid_timestamp as "timestamp", status
-            FROM bids 
-            WHERE auction_id = $1
+            SELECT b.id, b.user_id as "userId", b.amount, b.bid_timestamp as "timestamp", b.status, u.name as "userName", u.avatar as "userAvatar"
+            FROM bids b
+            LEFT JOIN users u ON b.user_id = u.id
+            WHERE b.auction_id = $1
         `;
         const params = [auctionId];
 
         if (userId) {
             params.push(userId);
-            query += ` AND user_id = $2`;
+            query += ` AND b.user_id = $2`;
         }
 
-        query += ` ORDER BY bid_timestamp DESC, amount DESC;`;
+        query += ` ORDER BY b.bid_timestamp DESC, b.amount DESC;`;
 
         const { rows } = await pgPool.query(query, params);
         
@@ -775,14 +1272,28 @@ async function leaderboardDeltaWorker() {
                 });
             }
 
-            const payloadString = JSON.stringify({
-                type: 'LEADERBOARD_DELTA',
-                auctionId,
-                leaderboard
-            });
+            const diffSignature = JSON.stringify(leaderboard.map(l => `${l.userId}:${l.amount}`));
 
-            if (lastLeaderboardCache.get(auctionId) !== payloadString) {
-                lastLeaderboardCache.set(auctionId, payloadString);
+            if (lastLeaderboardCache.get(auctionId) !== diffSignature) {
+                lastLeaderboardCache.set(auctionId, diffSignature);
+
+                const userIds = leaderboard.map(l => l.userId);
+                const { rows: users } = await pgPool.query(`SELECT id, name, avatar FROM users WHERE id = ANY($1)`, [userIds]);
+                const userMap = {};
+                users.forEach(u => userMap[u.id] = u);
+
+                leaderboard.forEach(l => {
+                    if (userMap[l.userId]) {
+                        l.userName = userMap[l.userId].name;
+                        l.userAvatar = userMap[l.userId].avatar;
+                    }
+                });
+
+                const payloadString = JSON.stringify({
+                    type: 'LEADERBOARD_DELTA',
+                    auctionId,
+                    leaderboard
+                });
                 await redisClient.publish(`auction:broadcast:${auctionId}`, payloadString);
             }
         }

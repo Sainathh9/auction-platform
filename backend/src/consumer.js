@@ -93,18 +93,21 @@ async function runConsumer() {
                 if (acceptedBids.length > 0) {
                     // Group by auctionId to find max amount in this batch
                     const maxByAuction = {};
+                    const bidCounts = {};
                     for (const b of acceptedBids) {
                         if (!maxByAuction[b.auctionId] || b.amount > maxByAuction[b.auctionId]) {
                             maxByAuction[b.auctionId] = b.amount;
                         }
+                        bidCounts[b.auctionId] = (bidCounts[b.auctionId] || 0) + 1;
                     }
 
                     for (const [auctionId, maxAmount] of Object.entries(maxByAuction)) {
                         await client.query(
                             `UPDATE auctions 
-                             SET current_highest_bid = GREATEST(current_highest_bid, $1) 
-                             WHERE id = $2;`,
-                            [maxAmount, auctionId]
+                             SET current_highest_bid = GREATEST(current_highest_bid, $1),
+                                 bid_count = bid_count + $2
+                             WHERE id = $3;`,
+                            [maxAmount, bidCounts[auctionId], auctionId]
                         );
                     }
                 }

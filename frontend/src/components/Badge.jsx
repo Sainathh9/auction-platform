@@ -1,27 +1,33 @@
-const VARIANT_STYLES = {
-  live: 'bg-[#1F5E45]/10 text-[#1F5E45]',
-  'closing-soon': 'bg-[#D97706]/10 text-[#D97706]',
-  closed: 'bg-[#6B7280]/10 text-[#6B7280]',
-  winning: 'text-[#1F5E45]',
-  outbid: 'text-[#B91C1C]',
-  lost: 'text-[#6B7280]',
-};
-
 const VARIANT_LABELS = {
-  live: 'Live',
+  live: 'Ongoing',
+  ongoing: 'Ongoing',
   'closing-soon': 'Closing Soon',
-  closed: 'Closed',
+  closed: 'Ended',
+  ended: 'Ended',
   winning: 'Winning',
   outbid: 'Outbid',
   lost: 'Lost',
+  won: 'Won',
+};
+
+const VARIANT_COLORS = {
+  live: 'text-gray-900 font-semibold',
+  ongoing: 'text-gray-900 font-semibold',
+  'closing-soon': 'text-gray-900 font-semibold',
+  closed: 'text-gray-400 font-normal',
+  ended: 'text-gray-400 font-normal',
+  winning: 'text-gray-900 font-semibold',
+  outbid: 'text-gray-500 font-normal',
+  lost: 'text-gray-400 font-normal',
+  won: 'text-gray-900 font-bold',
 };
 
 export default function Badge({ variant, label }) {
   const displayLabel = label || VARIANT_LABELS[variant] || variant;
-  const style = VARIANT_STYLES[variant] || VARIANT_STYLES.closed;
+  const colorClass = VARIANT_COLORS[variant] || 'text-gray-700';
 
   return (
-    <span className={`inline-block px-2 py-0.5 text-xs font-medium tracking-wide uppercase ${style}`}>
+    <span className={`text-xs font-medium tracking-tight uppercase ${colorClass}`}>
       {displayLabel}
     </span>
   );
