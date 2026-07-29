@@ -1,9 +1,9 @@
-# ArtMart: Real-Time High-Throughput Bidding Engine
+# OutBid: Real-Time High-Throughput Bidding Engine
 
 > A high-performance, event-driven distributed system for live auction bidding.
 
 ## Project Overview
-ArtMart is a high-frequency real-time auction platform designed to handle thousands of concurrent bids with sub-millisecond latency. Built to solve the concurrency challenges of live bidding (e.g., race conditions, delayed updates, and database bottlenecks), this system decouples state validation from persistence using an event-driven architecture. 
+OutBid is a high-frequency real-time auction platform designed to handle thousands of concurrent bids with sub-millisecond latency. Built to solve the concurrency challenges of live bidding (e.g., race conditions, delayed updates, and database bottlenecks), this system decouples state validation from persistence using an event-driven architecture. 
 
 It is technically interesting because it employs **Redis Lua scripting** for atomic bid validation (preventing race conditions) and **Apache Kafka** for asynchronous database writes, allowing the system to handle massive traffic spikes during the final seconds of an auction without dropping connections or blocking the main thread.
 
