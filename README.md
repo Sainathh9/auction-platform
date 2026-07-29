@@ -21,17 +21,17 @@ The system is divided into two primary execution paths:
 
 ```mermaid
 graph TD
-    Client1[Web Client] <-->|WebSocket| Gateway(API Gateway & WS Server)
-    Client2[Web Client] <-->|WebSocket| Gateway
+    Client1["Web Client"] <-->|"WebSocket"| Gateway["API Gateway & WS Server"]
+    Client2["Web Client"] <-->|"WebSocket"| Gateway
     
-    Gateway -->|1. Validate Bid (Lua Script)| Redis[(Redis Hot State)]
-    Redis -.->|2. Return Success/Fail| Gateway
+    Gateway -->|"1. Validate Bid (Lua Script)"| Redis[("Redis Hot State")]
+    Redis -.->|"2. Return Success/Fail"| Gateway
     
-    Gateway -->|3. Publish Event| Kafka[Apache Kafka]
-    Gateway -->|4. Broadcast via Pub/Sub| Redis
+    Gateway -->|"3. Publish Event"| Kafka["Apache Kafka"]
+    Gateway -->|"4. Broadcast via Pub/Sub"| Redis
     
-    Kafka -->|5. Consume Events| Consumer(Kafka Consumer Node)
-    Consumer -->|6. Batch Insert| Postgres[(PostgreSQL Cold State)]
+    Kafka -->|"5. Consume Events"| Consumer["Kafka Consumer Node"]
+    Consumer -->|"6. Batch Insert"| Postgres[("PostgreSQL Cold State")]
 ```
 
 ## Tech Stack
