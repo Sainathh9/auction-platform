@@ -46,7 +46,7 @@ export function ToastProvider({ children }) {
               onClick={() => removeToast(toast.id)}
               className="text-gray-400 hover:text-white text-xs cursor-pointer px-1"
             >
-              ✕
+              
             </button>
           </div>
         ))}

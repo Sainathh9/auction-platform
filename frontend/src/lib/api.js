@@ -26,10 +26,19 @@ async function request(path, options = {}) {
   }
 }
 
+/**
+ * Fetches all available auctions.
+ * @returns {Promise<Array>} List of auctions.
+ */
 export function getAllAuctions() {
   return request('/api/auctions');
 }
 
+/**
+ * Retrieves details for a specific auction.
+ * @param {string} auctionId - The unique identifier of the auction.
+ * @returns {Promise<Object>} Auction details.
+ */
 export function getAuction(auctionId) {
   return request(`/api/auctions/${encodeURIComponent(auctionId)}`);
 }
@@ -41,11 +50,22 @@ export function seedAuction({ auctionId, title, startPrice, startTime, endTime, 
   });
 }
 
+/**
+ * Retrieves the bidding history for a specific auction.
+ * @param {string} auctionId - The unique identifier of the auction.
+ * @param {string} [userId] - Optional user identifier to filter history.
+ * @returns {Promise<Array>} List of historical bids.
+ */
 export function getAuctionHistory(auctionId, userId) {
   const params = userId ? `?userId=${encodeURIComponent(userId)}` : '';
   return request(`/api/auctions/${encodeURIComponent(auctionId)}/history${params}`);
 }
 
+/**
+ * Fetches the highest bids placed by a user across all auctions.
+ * @param {string} [userId] - Optional user identifier.
+ * @returns {Promise<Array>} List of user bids.
+ */
 export function getUserBidsApi(userId) {
   const params = userId ? `?userId=${encodeURIComponent(userId)}` : '';
   return request(`/api/bids/me${params}`);
@@ -91,6 +111,11 @@ export function getCategories() {
   return request('/api/categories');
 }
 
+/**
+ * Uploads a collection of images to the server.
+ * @param {FileList|Array} files - The image files to upload.
+ * @returns {Promise<Object>} Upload response containing image URLs.
+ */
 export async function uploadImages(files) {
   const formData = new FormData();
   for (let i = 0; i < files.length; i++) {

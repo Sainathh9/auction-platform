@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { Kafka, Partitioners } from 'kafkajs';
+import { Kafka } from 'kafkajs';
 import pkg from 'pg';
 const { Pool } = pkg;
 

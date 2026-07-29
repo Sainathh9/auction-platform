@@ -345,7 +345,7 @@ export default function Admin() {
                 />
                 {startDatetime && endDatetime && new Date(endDatetime) > new Date(startDatetime) && (
                   <p className="text-xs text-emerald-600 font-mono mt-2 flex items-center gap-1.5">
-                    <span>⏱</span>
+                    <span></span>
                     Duration: {Math.round((new Date(endDatetime) - new Date(startDatetime)) / 60000)} minutes
                   </p>
                 )}
@@ -407,7 +407,7 @@ export default function Admin() {
                   </>
                 ) : (
                   <>
-                    <span>＋</span>
+                    <span></span>
                     Seed Auction Lot
                   </>
                 )}

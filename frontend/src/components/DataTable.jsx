@@ -54,7 +54,7 @@ export default function DataTable({ columns, data, onRowClick, emptyMessage = 'N
                 <span className="inline-flex items-center gap-1">
                   {col.label}
                   {col.sortable && sortKey === col.key && (
-                    <span className="text-[10px]">{sortDir === 'asc' ? '▲' : '▼'}</span>
+                    <span className="text-[10px]">{sortDir === 'asc' ? '' : ''}</span>
                   )}
                 </span>
               </th>

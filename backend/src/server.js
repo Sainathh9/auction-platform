@@ -2,7 +2,6 @@ import 'dotenv/config';
 import express from 'express';
 import { WebSocketServer } from 'ws';
 import Redis from 'ioredis';
-import { z } from 'zod';
 import { Kafka, Partitioners } from 'kafkajs';
 import pkg from 'pg';
 import { Queue, Worker } from 'bullmq';
@@ -34,12 +33,12 @@ const JWT_SECRET = process.env.JWT_SECRET || 'your-production-secret-key';
 
 const app = express();
 
-// ENV VARIABLE FALLBACKS WITH DEFAULTS
+// Environment Variable Configuration
 const PORT = process.env.PORT || 3000;
 const REDIS_HOST = process.env.REDIS_HOST || '127.0.0.1';
 const REDIS_PORT = process.env.REDIS_PORT || 6379;
 
-// PROMETHEUS METRICS INSTRUMENTATION
+// Prometheus Metrics Instrumentation
 client.collectDefaultMetrics({ prefix: 'bidding_' });
 
 export const activeConnectionsGauge = new client.Gauge({
@@ -65,7 +64,7 @@ export const expiryLagHistogram = new client.Histogram({
     buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5]
 });
 
-// BULLMQ CONFIGURATION
+// BullMQ Configuration
 const bullRedisConfig = {
     host: REDIS_HOST,
     port: Number(REDIS_PORT)
@@ -76,7 +75,7 @@ const auctionExpiryQueue = new Queue('auction-expiry', {
     connection: bullRedisConfig
 });
 
-// LOCAL POSTGRES DEPLOYMENT CONFIGURATION
+// PostgreSQL Configuration
 // host must be '127.0.0.1' (TCP) with password:'' for pg18 trust auth to work without SCRAM
 const pgPool = new Pool({
     user: process.env.DB_USER || 'sainath',
@@ -87,7 +86,7 @@ const pgPool = new Pool({
     max: 20
 });
 
-// REDIS CLIENT INITIALIZATION WITH ENV CONFIGS
+// Redis Client Initialization
 const redisClient = new Redis({ host: REDIS_HOST, port: Number(REDIS_PORT) });
 const redisSubClient = new Redis({ host: REDIS_HOST, port: Number(REDIS_PORT) });
 
@@ -215,7 +214,7 @@ app.use((req, res, next) => {
     next();
 });
 
-// KAFKA BROKER INITIALIZATION
+// Kafka Producer Initialization
 const kafka = new Kafka({
     clientId: 'auction-gateway',
     brokers: kafkaBrokers
@@ -236,7 +235,7 @@ async function initKafka() {
 }
 initKafka();
 
-// 3. RUNTIME SCHEMAS & LUA TRANSACTIONS
+// Runtime Schemas and Redis Lua Scripts
 const BidSchema = z.object({
     userId: z.string().min(1),
     amount: z.coerce.number().positive()
@@ -296,10 +295,10 @@ const DUAL_STORE_LUA = `
 
 redisClient.defineCommand('processStrictBid', { numberOfKeys: 2, lua: DUAL_STORE_LUA });
 
-// AUTHENTICATION ENDPOINTS (JWT, bcrypt, Google OAuth)
+// Authentication Endpoints
 app.use(express.json());
 
-// DATABASE INITIALIZATION & AUTOMATIC CATALOG SEEDING
+// Database Initialization and Seeding
 async function initDatabase() {
     try {
         const client = await pgPool.connect();
@@ -522,7 +521,7 @@ app.get('/api/auth/me', (req, res) => {
   }
 });
 
-// JWT AUTHORIZATION MIDDLEWARE FOR PROTECTED API ENDPOINTS
+// JWT Authorization Middleware
 export const requireAuth = (req, res, next) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -539,7 +538,7 @@ export const requireAuth = (req, res, next) => {
   }
 };
 
-// PROMETHEUS SCRAPING ROUTE
+// Prometheus Metrics Route
 app.get('/metrics', async (req, res) => {
     try {
         res.set('Content-Type', client.register.contentType);
@@ -549,7 +548,7 @@ app.get('/metrics', async (req, res) => {
     }
 });
 
-// 4. SEEDING ROUTE
+// Seeding Route
 app.post('/api/auctions/seed', async (req, res) => {
     const { auctionId, title, startPrice, startTime, endTime, category = 'Collectibles', images = ['/images/rolex.png'], description = '' } = req.body;
 
@@ -689,7 +688,7 @@ server.on('upgrade', (request, socket, head) => {
 
 const auctionRooms = new Map();
 
-// 5. REDIS PUB/SUB SYSTEM INDEPENDENT NODE MULTIPLEXING
+// Redis Pub/Sub Configuration for Multi-Node Support
 redisSubClient.psubscribe('auction:broadcast:*');
 redisSubClient.on('pmessage', (pattern, channel, message) => {
     const auctionId = channel.split(':').pop();
@@ -701,7 +700,7 @@ redisSubClient.on('pmessage', (pattern, channel, message) => {
     }
 });
 
-// 6. WEBSOCKET PIPELINE WITH IN-MEMORY FIFO BUFFER QUEUE
+// WebSocket Event Pipeline
 wss.on('connection', (ws, req) => {
     activeConnectionsGauge.inc();
 
@@ -802,7 +801,7 @@ wss.on('connection', (ws, req) => {
                 // Direct loopback ACK to the bidding socket
                 ws.send(JSON.stringify({ type: 'BID_ACK', status: 'ACCEPTED', amount }));
 
-                // --- ANTI-SNIPING EXTENSION LOGIC ---
+                // Process auction extensions for bids placed near expiration.
                 if (result === 2) {
                     const newExpiresAt = await redisClient.hget(hsetKey, 'expires_at');
                     const jobId = `expire--${auctionId}`;
@@ -919,7 +918,7 @@ wss.on('connection', (ws, req) => {
 
         } catch (err) {
             bidCounter.labels({ status: 'ERROR' }).inc();
-            console.error('❌ [CRITICAL GATEWAY ERROR STACK]:', err);
+            console.error(' [CRITICAL GATEWAY ERROR STACK]:', err);
             ws.send(JSON.stringify({ type: 'ERROR', error: err.message || 'Invalid operation.' }));
         } finally {
             isProcessing = false;

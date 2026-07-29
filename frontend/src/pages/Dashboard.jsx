@@ -318,7 +318,7 @@ export default function Dashboard() {
                       <h4 className="font-bold text-base text-gray-900 group-hover:text-black leading-snug">{seller.name}</h4>
                       <div className="text-xs text-gray-500 mt-1">{seller.sales} Available</div>
                       <div className="text-xs font-bold text-gray-900 mt-1.5 flex items-center gap-1">
-                        <span className="text-amber-500">★</span>
+                        <span className="text-amber-500"></span>
                         <span>{seller.rating} Seller Score</span>
                       </div>
                     </div>
@@ -350,7 +350,7 @@ export default function Dashboard() {
                   onClick={() => setSearchQuery('')}
                   className="absolute right-3.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-900 text-xs cursor-pointer"
                 >
-                  ✕
+                  
                 </button>
               )}
             </div>

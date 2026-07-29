@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { getAuction, getAuctionHistory } from '../lib/api';
 import { useWebSocket } from '../hooks/useWebSocket';
@@ -30,8 +30,11 @@ export default function AuctionDetail() {
   const [bidHistory, setBidHistory] = useState([]);
   const [processing, setProcessing] = useState(false);
   const [expiresAt, setExpiresAt] = useState(0);
-  const feedRef = useRef(null);
 
+  /**
+   * Processes incoming real-time WebSocket messages.
+   * Defined with useCallback to maintain a stable reference and bypass React's state batching issues during high-throughput bidding.
+   */
   const handleWebSocketMessage = useCallback((lastMessage) => {
     if (!lastMessage) return;
 
@@ -84,7 +87,7 @@ export default function AuctionDetail() {
       case 'AUCTION_EXTENDED':
         if (lastMessage.newExpiresAt && lastMessage.newExpiresAt > 0) {
           setExpiresAt(lastMessage.newExpiresAt);
-          addToast('⏱ Auction extended — last-minute bid detected!', 'info');
+          addToast(' Auction extended — last-minute bid detected!', 'info');
         }
         break;
 
@@ -100,7 +103,10 @@ export default function AuctionDetail() {
 
   const { isConnected, sendBid } = useWebSocket(id, handleWebSocketMessage);
 
-  // Fetch auction details & bid history from backend API on mount / ID change
+  /**
+   * Fetch initial auction details and bid history from the API.
+   * This provides the foundational state before WebSocket real-time updates kick in.
+   */
   useEffect(() => {
     setLoading(true);
     Promise.all([
@@ -263,7 +269,7 @@ export default function AuctionDetail() {
           <div className="border border-gray-200 bg-gray-50 p-4 flex items-center justify-between text-xs">
             <div className="flex items-center gap-3">
               <span className="w-8 h-8 rounded-full bg-gray-900 text-white flex items-center justify-center font-bold">
-                ✓
+                
               </span>
               <div>
                 <div className="font-semibold text-gray-900">Verified Provenance & Certificate</div>
@@ -352,7 +358,7 @@ export default function AuctionDetail() {
               </span>
             </div>
 
-            <div ref={feedRef} className="overflow-y-auto max-h-[320px] divide-y divide-gray-100">
+            <div className="overflow-y-auto max-h-[320px] divide-y divide-gray-100">
               {bidHistory.length === 0 ? (
                 <div className="px-4 py-8 text-center text-xs text-gray-500 font-mono">
                   No bids recorded yet. Be the first bidder!
