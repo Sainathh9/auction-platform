@@ -87,11 +87,11 @@ PORT=3000
 REDIS_HOST=127.0.0.1
 REDIS_PORT=6379
 DB_HOST=127.0.0.1
-DB_USER=sainath
-DB_PASSWORD=postgrespassword
+DB_USER=your_db_username
+DB_PASSWORD=your_db_password
 DB_NAME=bidding_engine
 KAFKA_BROKERS=localhost:9092
-JWT_SECRET=your_jwt_secret
+JWT_SECRET=your_super_secret_key
 ```
 
 ### Running with Docker Compose (Recommended)
